@@ -164,3 +164,4 @@ cython_debug/
 fonts
 dist
 build
+*.zip
