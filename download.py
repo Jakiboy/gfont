@@ -4,7 +4,6 @@ import requests
 import sys
 from urllib.parse import urlparse
 from fontTools.ttLib import TTFont
-from fontTools.subset import Subsetter, Options
 
 # Function to download the font
 def download_font(url, output_path):
@@ -38,74 +37,83 @@ def parse_and_download_font(url, output_dir):
         print(f"Error fetching content from {url}: {e}")
         return
     
-    # Extract font-family from the CSS using regex
-    font_family_pattern = re.compile(r"font-family:\s*'([^']+)';", re.IGNORECASE)
-    font_family_match = font_family_pattern.search(content)
+    # Extract font-family and other font-face properties
+    font_face_pattern = re.compile(
+        r"@font-face\s*{\s*"
+        r"font-family:\s*'([^']+)';\s*"
+        r"(font-style:\s*(\w+);)?\s*"
+        r"(font-weight:\s*([\w\d]+);)?\s*"
+        r"(font-display:\s*(\w+);)?\s*"
+        r"src:\s*url\((https://fonts.gstatic.com/[^)]+)\)\s*format\('([^']+)'\);",
+        re.IGNORECASE
+    )
+    matches = font_face_pattern.findall(content)
 
-    if not font_family_match:
-        print("No font-family found in the CSS.")
+    if not matches:
+        print("No font-face definitions with valid URLs found in the CSS.")
         return
-    
-    font_family = font_family_match.group(1)
-    print(f"Font family detected: {font_family}")
 
     # Ensure the output directory exists
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    
-    # Regex to match the src URL for font files
-    src_pattern = re.compile(r"src:\s*url\((https://fonts.gstatic.com/[^)]+\.woff2)\)\s*format\('woff2'\);|"
-                             r"src:\s*url\((https://fonts.gstatic.com/[^)]+\.woff)\)\s*format\('woff'\);|"
-                             r"src:\s*url\((https://fonts.gstatic.com/[^)]+\.ttf)\)\s*format\('truetype'\);", re.IGNORECASE)
-    matches = src_pattern.findall(content)
 
-    if not matches:
-        print("No .woff, .woff2, or .ttf fonts found in the CSS.")
-        return
-
-    # Parse the font-face and download the font files
+    # Parse the font-face rules and download fonts
     font_files = []
-    for font_urls in matches:
-        for font_url in font_urls:
-            if font_url:  # Ensure that the match is valid
-                # Extract a clean name for the font file
-                font_name = font_url.split('/')[-1]
-                font_name = font_name.replace('?', '_').replace('&', '_')
-                font_path = os.path.join(output_dir, font_name)
-                
-                # If the font is .ttf, we will convert it to .woff2
-                if font_name.endswith('.ttf'):
-                    ttf_path = font_path  # Temporary path for TTF
-                    download_font(font_url, ttf_path)
-                    woff2_name = font_name.replace('.ttf', '.woff2')
-                    woff2_path = os.path.join(output_dir, woff2_name)
-                    convert_ttf_to_woff2(ttf_path, woff2_path)
-                    os.remove(ttf_path)  # Remove the original TTF file
-                    font_files.append((woff2_path, woff2_name))
-                else:
-                    # Download the .woff2 or .woff font directly
-                    download_font(font_url, font_path)
-                    font_files.append((font_url, font_name))
+    for match in matches:
+        font_family, _, font_style, _, font_weight, _, font_display, font_url, font_format = match
+
+        # Use default values if properties are missing
+        font_style = font_style or 'normal'
+        font_weight = font_weight or '400'
+        font_display = font_display or 'swap'
+
+        # Extract a clean name for the font file
+        font_name = font_url.split('/')[-1]
+        font_name = font_name.replace('?', '_').replace('&', '_')
+        font_path = os.path.join(output_dir, font_name)
+
+        # If the font is .ttf, convert it to .woff2
+        if font_name.endswith('.ttf'):
+            ttf_path = font_path
+            download_font(font_url, ttf_path)
+            woff2_name = font_name.replace('.ttf', '.woff2')
+            woff2_path = os.path.join(output_dir, woff2_name)
+            convert_ttf_to_woff2(ttf_path, woff2_path)
+            os.remove(ttf_path)  # Remove the original TTF file
+            font_files.append({
+                "font_family": font_family,
+                "font_style": font_style,
+                "font_weight": font_weight,
+                "font_display": font_display,
+                "font_name": woff2_name,
+                "font_format": 'woff2'
+            })
+        else:
+            # Download the .woff2 or .woff font directly
+            download_font(font_url, font_path)
+            font_files.append({
+                "font_family": font_family,
+                "font_style": font_style,
+                "font_weight": font_weight,
+                "font_display": font_display,
+                "font_name": font_name,
+                "font_format": font_format
+            })
 
     # Generate a new CSS file that points to the local font files
     css_filename = os.path.join(output_dir, "local_fonts.css")
     with open(css_filename, 'w') as f:
         f.write("/* Generated CSS for local font files */\n")
-        for url, font_name in font_files:
-            font_face_rule = f"""
+        for font in font_files:
+            f.write(f"""
 @font-face {{
-    font-family: '{font_family}';
-    src: url('{font_name}') format('woff2');
-    font-display: swap;
+    font-family: '{font["font_family"]}';
+    src: url('{font["font_name"]}') format('{font["font_format"]}');
+    font-style: {font["font_style"]};
+    font-weight: {font["font_weight"]};
+    font-display: {font["font_display"]};
 }}
-"""
-            # Check the file extension to update the format in CSS if it's not woff2
-            if font_name.endswith('.woff'):
-                font_face_rule = font_face_rule.replace('woff2', 'woff')
-            elif font_name.endswith('.ttf'):
-                font_face_rule = font_face_rule.replace('woff2', 'truetype')
-                
-            f.write(font_face_rule)
+""")
         print(f"CSS file generated: {css_filename}")
 
 # Main function to process the input URL and output folder
